@@ -1,6 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 """
-Voice Assistant с автоматическим распознаванием речи через Whisper
+Voice_Assistant с автоматическим распознаванием речи через Whisper
 и улучшением текста через Google Gemini.
 
 Финальная версия с интерфейсом на PySide6.
@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
     QSizeGrip,
     QSplitter,
     QStyledItemDelegate,
+    QInputDialog,
 )
 from PySide6.QtGui import QIcon, QAction, QMouseEvent, QPainter, QColor, QPixmap, QFont
 from PySide6.QtCore import (
@@ -184,15 +185,6 @@ if getattr(sys, "frozen", False):
     exe_dir = os.path.dirname(sys.executable)
     os.chdir(exe_dir)
 
-    with open("startup_log.txt", "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.datetime.now()}] === ЗАПУСК ПРИЛОЖЕНИЯ ===\n")
-        f.write(f"sys.executable: {sys.executable}\n")
-        f.write(f"sys.argv[0]: {sys.argv[0]}\n")
-        f.write(f"EXE_DIR: {exe_dir}\n")
-        f.write(f"MODELS_DIR: {get_models_directory()}\n")
-        f.write(f"os.getcwd(): {os.getcwd()}\n")
-        f.write(f"sys.frozen: {getattr(sys, 'frozen', False)}\n\n")
-
 
 # --- Конфигурация ---
 EXE_DIR = get_exe_directory()
@@ -224,7 +216,7 @@ DEFAULT_SETTINGS = {
     "compact_width": 301,
     "compact_height": 113,
     "expanded_width": 733,
-    "expanded_height": 707,
+    "expanded_height": 878,
     "window_pos_x": 1132,
     "window_pos_y": 40,
     "history_window_width": 1000,
@@ -240,14 +232,14 @@ DEFAULT_SETTINGS = {
     "gemini_model_default": "gemini-2.5-flash",
     "gemini_model_pro": "gemini-2.5-pro",
     "selection_word": "выделить",
-    "pro_word": "старт",
-    "flash_word": "финиш",
-    "gemini_api_key": "",  # ← НОВАЯ НАСТРОЙКА!
+    "pro_word": "Про",
+    "flash_word": "Флеш",
+    "gemini_api_key": "",
     # VLESS VPN настройки
     "vless_enabled": True,
     "vless_url": "",
     "vless_autostart": True,
-    "vless_port": 10809,  # ← НОВАЯ НАСТРОЙКА!
+    "vless_port": 10809, 
 }
 
 COLORS = {
@@ -495,6 +487,10 @@ class ModernWindow(QMainWindow):
         self.assistant.ui_signals = UiSignals()
         self.drag_pos = QPoint()
         self.is_resizing = False
+        self.resize_edges = tuple()
+        self.resize_origin = QPoint()
+        self.initial_geometry = QRect()
+        self.resize_margin = 12
         self.is_programmatic_resize = False
 
         self.setWindowTitle("Voice Assistant")
@@ -543,19 +539,120 @@ class ModernWindow(QMainWindow):
                     self.is_resizing = True
                     return
 
+            edges = self._detect_resize_edges(event.position().toPoint())
+            if edges:
+                self.is_resizing = True
+                self.resize_edges = edges
+                self.resize_origin = event.globalPosition().toPoint()
+                self.initial_geometry = self.geometry()
+                self.setCursor(self._cursor_for_edges(edges))
+                event.accept()
+                return
+
+            self.resize_edges = tuple()
             self.drag_pos = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
             event.accept()
+            return
+
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        if event.buttons() == Qt.MouseButton.LeftButton and not self.is_resizing:
+        if self.is_resizing and self.resize_edges:
+            self._resize_from_edge(event.globalPosition().toPoint())
+            event.accept()
+            return
+
+        if self.is_resizing:
+            event.accept()
+            return
+
+        if event.buttons() == Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self.drag_pos)
             event.accept()
+            return
+
+        self._update_hover_cursor(event.position().toPoint())
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         self.is_resizing = False
+        self.resize_edges = tuple()
+        self.resize_origin = QPoint()
+        self.initial_geometry = QRect()
+        self._update_hover_cursor(event.position().toPoint())
         super().mouseReleaseEvent(event)
+
+    def _detect_resize_edges(self, pos: QPoint):
+        margin = getattr(self, "resize_margin", 12)
+        edges = []
+        if pos.x() <= margin:
+            edges.append("left")
+        if pos.x() >= self.width() - margin:
+            edges.append("right")
+        if pos.y() >= self.height() - margin:
+            edges.append("bottom")
+        return tuple(edges)
+
+    def _cursor_for_edges(self, edges):
+        if not edges:
+            return Qt.CursorShape.ArrowCursor
+
+        has_left = "left" in edges
+        has_right = "right" in edges
+        has_bottom = "bottom" in edges
+
+        if has_bottom and has_left:
+            return Qt.CursorShape.SizeBDiagCursor
+        if has_bottom and has_right:
+            return Qt.CursorShape.SizeFDiagCursor
+        if has_bottom:
+            return Qt.CursorShape.SizeVerCursor
+        if has_left or has_right:
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.ArrowCursor
+
+    def _update_hover_cursor(self, pos: QPoint):
+        if self.is_resizing:
+            return
+        edges = self._detect_resize_edges(pos)
+        cursor = self._cursor_for_edges(edges)
+        if cursor == Qt.CursorShape.ArrowCursor:
+            self.unsetCursor()
+        else:
+            self.setCursor(cursor)
+
+    def _resize_from_edge(self, global_pos: QPoint):
+        if not self.resize_edges:
+            return
+
+        edges = set(self.resize_edges)
+        delta = global_pos - self.resize_origin
+        base_geom = QRect(self.initial_geometry)
+        new_geom = QRect(base_geom)
+
+        min_width = self.minimumWidth()
+        min_height = self.minimumHeight()
+
+        if "right" in edges:
+            new_width = max(min_width, base_geom.width() + delta.x())
+            new_geom.setWidth(new_width)
+
+        if "left" in edges:
+            new_width = base_geom.width() - delta.x()
+            if new_width < min_width:
+                new_left = base_geom.x() + (base_geom.width() - min_width)
+                new_width = min_width
+            else:
+                new_left = base_geom.x() + delta.x()
+            new_geom.setX(new_left)
+            new_geom.setWidth(new_width)
+
+        if "bottom" in edges:
+            new_height = max(min_height, base_geom.height() + delta.y())
+            new_geom.setHeight(new_height)
+
+        self.setGeometry(new_geom)
 
     def moveEvent(self, event):
         """Сохраняем позицию окна при перемещении"""
@@ -674,7 +771,7 @@ class ModernWindow(QMainWindow):
         ):
             QTimer.singleShot(500, self.update_vpn_status)
 
-        self.create_gemini_tab()
+        self.create_gemini_tab_v2()
 
     def create_gemini_tab(self):
         tab = QWidget()
@@ -715,33 +812,92 @@ class ModernWindow(QMainWindow):
         top_widget = QWidget()
         top_layout = QVBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
-
-        info_label = QLabel(
-            "Здесь можно указать инструкцию для Gemini по обработке текста."
+        top_layout.setSpacing(0)
+        top_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
+
+        info_label = QLabel("Здесь можно указать инструкцию для Gemini по обработке текста.")
         info_label.setWordWrap(True)
+        info_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         top_layout.addWidget(info_label)
-        top_layout.addStretch()
 
         bottom_widget = QGroupBox("Промпт для форматирования")
         bottom_layout = QVBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(5, 5, 5, 5)
+        # Initialize prompt profiles if missing
+        prompts = self.assistant.settings.get("gemini_prompts")
+        if not isinstance(prompts, dict) or not prompts:
+            current_prompt = self.assistant.settings.get("gemini_prompt", "")
+            prompts = {"Default": current_prompt}
+            self.assistant.save_setting("gemini_prompts", prompts)
+            self.assistant.save_setting("gemini_selected_prompt", "Default")
+
+        selected_profile = self.assistant.settings.get(
+            "gemini_selected_prompt", next(iter(prompts.keys()))
+        )
+        if selected_profile not in prompts:
+            selected_profile = next(iter(prompts.keys()))
+            self.assistant.save_setting("gemini_selected_prompt", selected_profile)
+
+        profile_bar = QHBoxLayout()
+        profile_bar.addWidget(QLabel("Профиль промпта:"))
+        self.gemini_prompt_combo = QComboBox()
+        self.gemini_prompt_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        for name in prompts.keys():
+            self.gemini_prompt_combo.addItem(name)
+        self.gemini_prompt_combo.setCurrentText(selected_profile)
+        self.prompt_add_btn = QPushButton("+")
+        self.prompt_add_btn.setToolTip("Добавить профиль")
+        self.prompt_rename_btn = QPushButton("✎")
+        self.prompt_rename_btn.setToolTip("Переименовать профиль")
+        self.prompt_delete_btn = QPushButton("🗑")
+        self.prompt_delete_btn.setToolTip("Удалить профиль")
+        button_size = self.gemini_prompt_combo.sizeHint().height()
+        for btn in (self.prompt_add_btn, self.prompt_rename_btn, self.prompt_delete_btn):
+            btn.setFixedSize(button_size, button_size)
+        profile_bar.addWidget(self.gemini_prompt_combo, 1)
+        profile_bar.addWidget(self.prompt_add_btn)
+        profile_bar.addWidget(self.prompt_rename_btn)
+        profile_bar.addWidget(self.prompt_delete_btn)
+        bottom_layout.addLayout(profile_bar)
 
         self.gemini_prompt_edit = QTextEdit()
         self.gemini_prompt_edit.setAcceptRichText(False)
+        self.gemini_prompt_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.gemini_prompt_edit.setPlainText(
             self.assistant.settings.get("gemini_prompt")
         )
-        bottom_layout.addWidget(self.gemini_prompt_edit)
+        bottom_layout.addWidget(self.gemini_prompt_edit, 1)
+        # Ensure editor shows the selected profile text
+        try:
+            self.gemini_prompt_edit.blockSignals(True)
+            self.gemini_prompt_edit.setPlainText(prompts.get(selected_profile, ""))
+        finally:
+            self.gemini_prompt_edit.blockSignals(False)
 
         self.gemini_splitter.addWidget(top_widget)
         self.gemini_splitter.addWidget(bottom_widget)
+        self.gemini_splitter.setChildrenCollapsible(False)
 
-        prompt_height = self.assistant.settings.get("gemini_prompt_height", 250)
-        total_height = self.gemini_splitter.sizeHint().height()
-        self.gemini_splitter.setSizes([total_height - prompt_height, prompt_height])
+        prompt_height = max(1, self.assistant.settings.get("gemini_prompt_height", 250))
+        info_height = max(1, info_label.sizeHint().height())
+        self.gemini_splitter.setSizes([info_height, prompt_height])
+        self.gemini_splitter.setStretchFactor(0, 0)
+        self.gemini_splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(self.gemini_splitter)
+        main_layout.setStretchFactor(self.gemini_splitter, 1)
+        # Wire up profile management handlers
+        self.gemini_prompt_combo.currentTextChanged.connect(self.on_gemini_prompt_profile_changed)
+        self.prompt_add_btn.clicked.connect(self.on_add_gemini_prompt_profile)
+        self.prompt_rename_btn.clicked.connect(self.on_rename_gemini_prompt_profile)
+        self.prompt_delete_btn.clicked.connect(self.on_delete_gemini_prompt_profile)
+        self.gemini_prompt_edit.textChanged.connect(self.on_gemini_prompt_text_changed_profile)
 
         activation_group = QGroupBox("Активационные слова")
         activation_layout = QVBoxLayout(activation_group)
@@ -772,6 +928,142 @@ class ModernWindow(QMainWindow):
         main_layout.addWidget(activation_group)
 
         self.tabs.addTab(tab, "Gemini")
+
+    def create_gemini_tab_v2(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        api_group = QGroupBox("API ключ")
+        api_layout = QVBoxLayout(api_group)
+
+        api_layout.addWidget(QLabel("Gemini API Key:"))
+        self.gemini_api_key_edit = QLineEdit()
+        self.gemini_api_key_edit.setText(self.assistant.settings.get("gemini_api_key", ""))
+        self.gemini_api_key_edit.setPlaceholderText("AIzaSy...")
+        self.gemini_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_layout.addWidget(self.gemini_api_key_edit)
+
+        show_key_layout = QHBoxLayout()
+        self.show_api_key_check = QCheckBox("Показать ключ")
+        self.show_api_key_check.stateChanged.connect(self.toggle_api_key_visibility)
+        show_key_layout.addWidget(self.show_api_key_check)
+        show_key_layout.addStretch()
+        api_layout.addLayout(show_key_layout)
+
+        layout.addWidget(api_group)
+
+        self.gemini_api_key_edit.editingFinished.connect(self.on_gemini_api_key_changed)
+
+        main_layout = layout
+        self.gemini_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+        top_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+
+        info_label = QLabel("Здесь можно указать инструкцию для Gemini по обработке текста.")
+        info_label.setWordWrap(True)
+        info_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        top_layout.addWidget(info_label)
+
+        bottom_widget = QGroupBox("Промпт для форматирования")
+        bottom_layout = QVBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(5, 5, 5, 5)
+
+        prompts = self.assistant.settings.get("gemini_prompts")
+        if not isinstance(prompts, dict) or not prompts:
+            current_prompt = self.assistant.settings.get("gemini_prompt", "")
+            prompts = {"Default": current_prompt}
+            self.assistant.save_setting("gemini_prompts", prompts)
+            self.assistant.save_setting("gemini_selected_prompt", "Default")
+
+        selected_profile = self.assistant.settings.get("gemini_selected_prompt", next(iter(prompts.keys())))
+        if selected_profile not in prompts:
+            selected_profile = next(iter(prompts.keys()))
+            self.assistant.save_setting("gemini_selected_prompt", selected_profile)
+
+        profile_bar = QHBoxLayout()
+        profile_bar.addWidget(QLabel("Профиль промпта:"))
+        self.gemini_prompt_combo = QComboBox()
+        self.gemini_prompt_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        for name in prompts.keys():
+            self.gemini_prompt_combo.addItem(name)
+        self.gemini_prompt_combo.setCurrentText(selected_profile)
+        self.prompt_add_btn = QPushButton("+")
+        self.prompt_add_btn.setToolTip("Добавить профиль")
+        self.prompt_rename_btn = QPushButton("✎")
+        self.prompt_rename_btn.setToolTip("Переименовать профиль")
+        self.prompt_delete_btn = QPushButton("🗑")
+        self.prompt_delete_btn.setToolTip("Удалить профиль")
+        button_size = self.gemini_prompt_combo.sizeHint().height()
+        for btn in (self.prompt_add_btn, self.prompt_rename_btn, self.prompt_delete_btn):
+            btn.setFixedSize(button_size, button_size)
+        profile_bar.addWidget(self.gemini_prompt_combo, 1)
+        profile_bar.addWidget(self.prompt_add_btn)
+        profile_bar.addWidget(self.prompt_rename_btn)
+        profile_bar.addWidget(self.prompt_delete_btn)
+        bottom_layout.addLayout(profile_bar)
+
+        self.gemini_prompt_edit = QTextEdit()
+        self.gemini_prompt_edit.setAcceptRichText(False)
+        self.gemini_prompt_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.gemini_prompt_edit.setPlainText(prompts.get(selected_profile, ""))
+        bottom_layout.addWidget(self.gemini_prompt_edit, 1)
+
+        self.gemini_splitter.addWidget(top_widget)
+        self.gemini_splitter.addWidget(bottom_widget)
+        self.gemini_splitter.setChildrenCollapsible(False)
+
+        prompt_height = max(1, self.assistant.settings.get("gemini_prompt_height", 250))
+        info_height = max(1, info_label.sizeHint().height())
+        self.gemini_splitter.setSizes([info_height, prompt_height])
+        self.gemini_splitter.setStretchFactor(0, 0)
+        self.gemini_splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(self.gemini_splitter)
+        main_layout.setStretchFactor(self.gemini_splitter, 1)
+
+        activation_group = QGroupBox("Ключевые слова")
+        activation_layout = QVBoxLayout(activation_group)
+
+        selection_layout = QHBoxLayout()
+        selection_layout.addWidget(QLabel("Слово выделения:"))
+        self.selection_word_edit = QLineEdit()
+        self.selection_word_edit.setText(self.assistant.settings.get("selection_word", "Выделение"))
+        selection_layout.addWidget(self.selection_word_edit)
+        activation_layout.addLayout(selection_layout)
+
+        pro_layout = QHBoxLayout()
+        pro_layout.addWidget(QLabel("Слово Pro-режима:"))
+        self.pro_word_edit = QLineEdit()
+        self.pro_word_edit.setText(self.assistant.settings.get("pro_word", "про"))
+        pro_layout.addWidget(self.pro_word_edit)
+        activation_layout.addLayout(pro_layout)
+
+        flash_layout = QHBoxLayout()
+        flash_layout.addWidget(QLabel("Слово Flash-режима:"))
+        self.flash_word_edit = QLineEdit()
+        self.flash_word_edit.setText(self.assistant.settings.get("flash_word", "флэш"))
+        flash_layout.addWidget(self.flash_word_edit)
+        activation_layout.addLayout(flash_layout)
+
+        main_layout.addWidget(activation_group)
+
+        self.tabs.addTab(tab, "Gemini")
+
+        self.gemini_prompt_combo.currentTextChanged.connect(self.on_gemini_prompt_profile_changed)
+        self.prompt_add_btn.clicked.connect(self.on_add_gemini_prompt_profile)
+        self.prompt_rename_btn.clicked.connect(self.on_rename_gemini_prompt_profile)
+        self.prompt_delete_btn.clicked.connect(self.on_delete_gemini_prompt_profile)
+        self.gemini_prompt_edit.textChanged.connect(self.on_gemini_prompt_text_changed_profile)
 
     def create_main_tab(self):
         tab = QWidget()
@@ -1379,7 +1671,7 @@ class ModernWindow(QMainWindow):
         self.clear_logs_btn.clicked.connect(self.clear_logs)
         self.view_history_btn.clicked.connect(self.show_selected_history)
         self.clear_history_btn.clicked.connect(self.clear_history)
-        self.gemini_prompt_edit.textChanged.connect(self.on_gemini_prompt_changed)
+        self.gemini_prompt_edit.textChanged.connect(self.on_gemini_prompt_text_changed_profile)
         self.gemini_splitter.splitterMoved.connect(self.on_gemini_splitter_moved)
         self.selection_word_edit.editingFinished.connect(self.on_selection_word_changed)
         self.pro_word_edit.editingFinished.connect(self.on_pro_word_changed)
@@ -1419,6 +1711,109 @@ class ModernWindow(QMainWindow):
             "gemini_prompt", self.gemini_prompt_edit.toPlainText()
         )
         self.assistant.show_status("Промпт Gemini сохранен", COLORS["accent"], False)
+
+    def on_gemini_prompt_text_changed_profile(self):
+        """Keep the current profile's text in sync with the editor."""
+        prompts = self.assistant.settings.get("gemini_prompts", {})
+        if hasattr(self, "gemini_prompt_combo") and isinstance(self.gemini_prompt_combo, QComboBox):
+            name = self.gemini_prompt_combo.currentText()
+            if name:
+                prompts[name] = self.gemini_prompt_edit.toPlainText()
+                self.assistant.save_setting("gemini_prompts", prompts)
+                self.assistant.save_setting("gemini_selected_prompt", name)
+
+    def on_gemini_prompt_profile_changed(self, name: str):
+        prompts = self.assistant.settings.get("gemini_prompts", {})
+        if name and name in prompts:
+            try:
+                self.gemini_prompt_edit.blockSignals(True)
+                self.gemini_prompt_edit.setPlainText(prompts[name])
+            finally:
+                self.gemini_prompt_edit.blockSignals(False)
+            self.assistant.save_setting("gemini_selected_prompt", name)
+            # Mirror to the single prompt setting for runtime use
+            self.assistant.save_setting("gemini_prompt", prompts[name])
+            self.assistant.show_status(f"Выбран профиль: {name}", COLORS["accent"], False)
+
+    def on_add_gemini_prompt_profile(self):
+        text, ok = QInputDialog.getText(self, "Новый профиль", "Введите название профиля:")
+        name = text.strip()
+        if not ok or not name:
+            return
+        prompts = self.assistant.settings.get("gemini_prompts", {})
+        if name in prompts:
+            QMessageBox.warning(self, "Ошибка", "Профиль с таким именем уже существует.")
+            return
+        prompts[name] = ""
+        self.assistant.save_setting("gemini_prompts", prompts)
+        self.gemini_prompt_combo.addItem(name)
+        self.gemini_prompt_combo.setCurrentText(name)
+        try:
+            self.gemini_prompt_edit.blockSignals(True)
+            self.gemini_prompt_edit.setPlainText("")
+        finally:
+            self.gemini_prompt_edit.blockSignals(False)
+        self.assistant.save_setting("gemini_selected_prompt", name)
+        self.assistant.save_setting("gemini_prompt", "")
+        self.assistant.show_status("Профиль добавлен", COLORS["accent"], False)
+
+    def on_rename_gemini_prompt_profile(self):
+        current = self.gemini_prompt_combo.currentText()
+        if not current:
+            return
+        text, ok = QInputDialog.getText(self, "Переименовать профиль", "Новое имя:", text=current)
+        new_name = text.strip()
+        if not ok or not new_name or new_name == current:
+            return
+        prompts = self.assistant.settings.get("gemini_prompts", {})
+        if new_name in prompts:
+            QMessageBox.warning(self, "Ошибка", "Профиль с таким именем уже существует.")
+            return
+        prompts[new_name] = prompts.pop(current, self.gemini_prompt_edit.toPlainText())
+        self.assistant.save_setting("gemini_prompts", prompts)
+        self.assistant.save_setting("gemini_selected_prompt", new_name)
+        self.gemini_prompt_combo.blockSignals(True)
+        self.gemini_prompt_combo.clear()
+        for n in prompts.keys():
+            self.gemini_prompt_combo.addItem(n)
+        self.gemini_prompt_combo.setCurrentText(new_name)
+        self.gemini_prompt_combo.blockSignals(False)
+        self.assistant.show_status("Профиль переименован", COLORS["accent"], False)
+
+    def on_delete_gemini_prompt_profile(self):
+        prompts = self.assistant.settings.get("gemini_prompts", {})
+        if len(prompts) <= 1:
+            QMessageBox.information(self, "Информация", "Нельзя удалить единственный профиль.")
+            return
+        current = self.gemini_prompt_combo.currentText()
+        reply = QMessageBox.question(
+            self,
+            "Удаление профиля",
+            f"Удалить профиль '{current}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if current in prompts:
+            prompts.pop(current)
+            self.assistant.save_setting("gemini_prompts", prompts)
+        self.gemini_prompt_combo.blockSignals(True)
+        self.gemini_prompt_combo.clear()
+        for n in prompts.keys():
+            self.gemini_prompt_combo.addItem(n)
+        first = next(iter(prompts.keys())) if prompts else ""
+        self.gemini_prompt_combo.setCurrentText(first)
+        self.gemini_prompt_combo.blockSignals(False)
+        new_text = prompts.get(first, "")
+        try:
+            self.gemini_prompt_edit.blockSignals(True)
+            self.gemini_prompt_edit.setPlainText(new_text)
+        finally:
+            self.gemini_prompt_edit.blockSignals(False)
+        self.assistant.save_setting("gemini_selected_prompt", first)
+        self.assistant.save_setting("gemini_prompt", new_text)
+        self.assistant.show_status("Профиль удален", COLORS["accent"], False)
 
     def on_selection_word_changed(self):
         self.assistant.save_setting("selection_word", self.selection_word_edit.text())
@@ -1983,6 +2378,17 @@ class VoiceAssistant:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     settings.update(json.load(f))
                 log_message(f"Настройки загружены из {SETTINGS_FILE}")
+                # Cleanup possible mojibake in stored strings
+                def _clean_text(val, fallback):
+                    if isinstance(val, str) and ("\ufffd" in val or "�" in val):
+                        return fallback
+                    return val
+                settings["selection_word"] = _clean_text(settings.get("selection_word"), "Выделение")
+                settings["pro_word"] = _clean_text(settings.get("pro_word"), "про")
+                settings["flash_word"] = _clean_text(settings.get("flash_word"), "флэш")
+                settings["sound_scheme"] = _clean_text(settings.get("sound_scheme"), "Стандартные")
+                settings["win_shift_mode"] = _clean_text(settings.get("win_shift_mode"), "Обычный")
+                settings["f1_mode"] = _clean_text(settings.get("f1_mode"), "Непрерывный")
         except Exception as e:
             log_message(f"Ошибка загрузки настроек: {e}")
         return settings
@@ -2775,21 +3181,12 @@ oLink.Save
 # --- Точка входа ---
 def main():
     try:
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Начало функции main()\n")
-
         log_separator()
         log_message("Voice Assistant запущен")
         log_separator()
 
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Создание QApplication\n")
-
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
-
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Применение стилей\n")
 
         # --- Глобальное применение стилей ---
         app.setStyleSheet(
@@ -2904,35 +3301,18 @@ def main():
         )
         # --- Конец глобальных стилей ---
 
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Создание VoiceAssistant\n")
-
         assistant = VoiceAssistant()
-
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Создание ModernWindow\n")
 
         window = ModernWindow(assistant)
 
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Запуск потока ассистента\n")
-
         assistant_thread = threading.Thread(target=assistant.run, daemon=True)
         assistant_thread.start()
-
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] Окно создано, запуск app.exec()\n")
 
         # Окно уже показано в __init__ ModernWindow
 
         sys.exit(app.exec())
 
     except Exception as e:
-        with open("startup_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] КРИТИЧЕСКАЯ ОШИБКА:\n")
-            f.write(f"{e}\n")
-            f.write(f"{traceback.format_exc()}\n")
-
         log_message(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
         log_message(traceback.format_exc())
         log_separator()

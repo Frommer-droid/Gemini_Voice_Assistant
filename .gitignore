@@ -1,0 +1,13 @@
+# Ignore everything by default
+*
+
+# Allow only these files to be tracked
+!.gitignore
+!README.md
+!voice_assistant.py
+!vless_manager.py
+!paste_text.ahk
+!paste_text.exe
+!xray.exe
+!logo.ico
+
