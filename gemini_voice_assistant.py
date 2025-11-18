@@ -36,6 +36,11 @@ import sounddevice as sd
 import winreg
 import traceback
 
+try:
+    import httpx
+except Exception:
+    httpx = None
+
 from google import genai
 from google.genai import types, errors as genai_errors
 from faster_whisper import WhisperModel
@@ -250,7 +255,7 @@ DEFAULT_SETTINGS = {
     "gemini_selected_prompt": "Диктовка",
     "gemini_prompt_height": 250,
     "gemini_model_default": "gemini-2.5-flash",
-    "gemini_model_pro": "gemini-2.5-pro",
+    "gemini_model_pro": "gemini-3-pro-preview",
     "selection_word": "выделить",
     "pro_word": "про",
     "flash_word": "флеш",
@@ -263,8 +268,8 @@ DEFAULT_SETTINGS = {
 }
 
 MODEL_FALLBACKS = {
-    "gemini-2.5-flash": "gemini-1.5-flash",
-    "gemini-2.5-pro": "gemini-1.5-pro",
+    "gemini-3-pro-preview": "gemini-2.5-pro",
+    "gemini-2.5-pro": "gemini-2.5-flash",
 }
 
 COLORS = {
@@ -2424,6 +2429,14 @@ class VoiceAssistant:
         self.ui_signals = None
         self.start_time = 0
         self.settings = self.load_settings()
+        thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
+        self._supports_thinking_level = "thinking_level" in thinking_fields
+        if self._supports_thinking_level:
+            log_message("Обнаружена поддержка Gemini thinking_level, используем новый режим.")
+        else:
+            log_message(
+                "thinking_level недоступен в установленной библиотеке, fallback на thinking_budget."
+            )
         # Инициализация VLESS VPN менеджера с настраиваемым портом
         vless_port = int(self.settings.get("vless_port", 10808))
         self.vless_manager = VLESSManager(log_func=log_message, socks_port=vless_port)
@@ -2498,9 +2511,39 @@ class VoiceAssistant:
                     settings["silence_detection_enabled"] = settings.get(
                         "audio_quality_check", True
                     )
+                self._apply_settings_migrations(settings)
         except Exception as e:
             log_message(f"Ошибка загрузки настроек: {e}")
         return settings
+
+    def _apply_settings_migrations(self, settings):
+        """Мигрирует ключевые настройки на Gemini 3."""
+        migrations = {
+            "gemini_model_pro": {
+                "gemini-2.5-pro": "gemini-3-pro-preview",
+                "gemini-1.5-pro": "gemini-3-pro-preview",
+            },
+            "gemini_model_default": {
+                "gemini-3-pro-preview": "gemini-2.5-flash",
+            },
+        }
+        updated = False
+        for key, replacements in migrations.items():
+            current_value = settings.get(key)
+            if current_value in replacements:
+                new_value = replacements[current_value]
+                settings[key] = new_value
+                updated = True
+                log_message(
+                    f"Миграция настройки '{key}' на Gemini 3 ({current_value} -> {new_value})"
+                )
+        if updated:
+            try:
+                with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, ensure_ascii=False, indent=2)
+                log_message("Настройки сохранены после миграции на Gemini 3.")
+            except Exception as e:
+                log_message(f"Не удалось сохранить настройки после миграции: {e}")
 
     def save_setting(self, key, value):
         self.settings[key] = value
@@ -3067,42 +3110,100 @@ class VoiceAssistant:
                 2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
             ).start()
 
-    def _generate_with_fallback(self, model_name, prompt, config):
-        """Отправляет запрос в Gemini с автоматическим откатом на поддерживаемые модели."""
+    def _generate_with_fallback(self, model_name, prompt, thinking_level):
+        """Отправляет запрос к Gemini, понижая модель при ошибках или недоступности."""
         attempted = set()
         current_model = model_name
+        current_level = thinking_level
 
         while True:
             attempted.add(current_model)
+            config = self._build_generation_config(current_level)
+
             try:
                 response = self.client.models.generate_content(
                     model=current_model, contents=prompt, config=config
                 )
-                return response, current_model
-            except genai_errors.ClientError as e:
+                return response, current_model, current_level
+            except Exception as e:
                 fallback_model = MODEL_FALLBACKS.get(current_model)
-                error_text = str(e)
-                status_code = getattr(e, "status_code", None) or getattr(e, "code", None)
                 should_fallback = (
                     fallback_model
                     and fallback_model not in attempted
-                    and ("Forbidden" in error_text or status_code in (403, 404))
+                    and self._should_try_fallback(e)
                 )
 
                 if should_fallback:
+                    error_text = str(e)
                     log_message(
-                        f"⚠ Модель '{current_model}' недоступна ({error_text}). "
-                        f"Пробуем '{fallback_model}'."
+                        f"⚠️ Модель '{current_model}' недоступна ({error_text}). "
+                        f"Переключаюсь на '{fallback_model}'."
                     )
                     self.show_status(
-                        f"{current_model} недоступна, пробую {fallback_model}",
+                        f"{current_model} не отвечает, пробуем {fallback_model}",
                         COLORS["btn_warning"],
                         True,
                     )
+                    if "flash" in fallback_model:
+                        current_level = "high"
+                    elif "pro" in fallback_model:
+                        current_level = "high"
                     current_model = fallback_model
                     continue
 
                 raise
+
+    def _determine_thinking_level(self, use_pro, use_flash):
+        """���������� желаемый thinking_level ��� Gemini 3."""
+        if use_flash:
+            return "low"
+        if use_pro or self.settings.get("thinking_enabled"):
+            return "high"
+        return "low"
+
+    def _build_generation_config(self, thinking_level):
+        """�������� ���-���� ��� Gemini � �������� thinking_level."""
+        level = thinking_level or "high"
+        if self._supports_thinking_level:
+            thinking_config = types.ThinkingConfig(thinking_level=level)
+        else:
+            budget = -1 if level == "high" else 0
+            thinking_config = types.ThinkingConfig(thinking_budget=budget)
+        return types.GenerateContentConfig(thinking_config=thinking_config)
+
+    def _should_try_fallback(self, error):
+        """Понимает, стоит ли пробовать резервную модель после ошибки."""
+        retryable_codes = {403, 404, 408, 409, 429, 500, 502, 503}
+        if isinstance(error, genai_errors.ClientError):
+            status_code = getattr(error, "status_code", None) or getattr(
+                error, "code", None
+            )
+            if status_code in retryable_codes:
+                return True
+            text = str(error).lower()
+            if any(
+                keyword in text
+                for keyword in (
+                    "quota",
+                    "exhausted",
+                    "temporarily unavailable",
+                    "unavailable",
+                    "timeout",
+                )
+            ):
+                return True
+        if isinstance(error, genai_errors.ServerError):
+            return True
+
+        if httpx is not None and isinstance(
+            error, (httpx.TransportError, httpx.TimeoutException)
+        ):
+            return True
+
+        if isinstance(error, (socket.timeout, ConnectionError)):
+            return True
+
+        return False
 
     def _handle_final_text(
         self,
@@ -3161,11 +3262,9 @@ class VoiceAssistant:
             else:  # По умолчанию, если нет команд
                 model_name = self.settings.get("gemini_model_default")
 
-            thinking_mode = (
-                "Thinking" if self.settings.get("thinking_enabled") else "Обычный"
-            )
+            thinking_level = self._determine_thinking_level(use_pro, use_flash)
             log_message(
-                f"Отправка в Gemini (модель: {model_name}, режим: {thinking_mode})"
+                f"Отправка в Gemini (модель: {model_name}, thinking_level: {thinking_level})"
             )
 
             if use_pro:
@@ -3175,24 +3274,15 @@ class VoiceAssistant:
             else:
                 self.show_status("Обработка Gemini...", COLORS["accent"], True)
 
-            # Pro модель всегда требует thinking mode
-            if use_pro or self.settings.get("thinking_enabled"):
-                config = types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_budget=-1)
-                )
-            else:
-                config = types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
-                )
-
             gemini_start = time.time()
-            response, used_model = self._generate_with_fallback(
-                model_name, prompt, config
+            response, used_model, used_level = self._generate_with_fallback(
+                model_name, prompt, thinking_level
             )
             final_text = response.text.strip()
             gemini_time = time.time() - gemini_start
             log_message(
-                f"Gemini обработка завершена за {gemini_time:.2f}с. (модель: {used_model})"
+                f"Gemini обработка завершена за {gemini_time:.2f}с. "
+                f"(модель: {used_model}, thinking_level: {used_level})"
             )
             log_message(f"Итоговый текст: {final_text}")
 
