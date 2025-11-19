@@ -8,6 +8,7 @@
 !vless_manager.py
 !paste_text.ahk
 !paste_text.exe
+!nircmd.exe
 !xray.exe
 !logo.ico
 !Build_Tools/
