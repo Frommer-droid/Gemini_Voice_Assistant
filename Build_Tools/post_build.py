@@ -29,6 +29,19 @@ def main():
             print(f"[ERROR] Failed to copy logo.ico: {e}")
     else:
         print(f"[SKIP] logo.ico or dist not found")
+
+    # ========== 1a. Копируем VERSION ==========
+    version_source = os.path.join(project_root, 'VERSION')
+    version_dest = os.path.join(dist_app_dir, 'VERSION')
+
+    if os.path.exists(version_source) and os.path.exists(dist_app_dir):
+        try:
+            shutil.copy2(version_source, version_dest)
+            print(f"[OK] Copied VERSION")
+        except Exception as e:
+            print(f"[ERROR] Failed to copy VERSION: {e}")
+    else:
+        print(f"[SKIP] VERSION or dist not found")
     
     # ========== 2. КОПИРУЕМ whisper_models ==========
     whisper_source = os.path.join(project_root, 'whisper_models')
