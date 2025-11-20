@@ -4,6 +4,8 @@
 # Allow only these files to be tracked
 !.gitignore
 !README.md
+!RELEASE_NOTES.md
+!VERSION
 !gemini_voice_assistant.py
 !vless_manager.py
 !paste_text.ahk

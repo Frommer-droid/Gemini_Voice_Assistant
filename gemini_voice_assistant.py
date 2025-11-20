@@ -3178,14 +3178,31 @@ class VoiceAssistant:
                     f"Распознанный текст ({len(final_text)} символов): {final_text}"
                 )
 
-                words = [
-                    re.sub(r"[^\w\s]", "", w).lower()
-                    for w in final_text.strip().split()
+                raw_words = final_text.strip().split()
+                tokens = [
+                    (re.sub(r"[^\w]", "", w, flags=re.UNICODE).lower(), w)
+                    for w in raw_words
                 ]
+
+                def _next_meaningful(start_index):
+                    """Возвращает индекс и нормализованное слово, пропуская пустые токены."""
+                    for idx in range(start_index, len(tokens)):
+                        norm, _ = tokens[idx]
+                        if norm:
+                            return idx, norm
+                    return None, ""
+
+                first_idx, first_word = _next_meaningful(0)
+                if first_idx is None:
+                    log_message("ОШИБКА: не удалось найти первое слово после очистки.")
+                    self.show_status("Не распознано", COLORS["btn_warning"], False)
+                    return
+
                 use_pro_model = False
                 use_flash_model = False
                 use_selected_text = False
                 words_to_skip = 0
+                active_profile_name = None
 
                 pro_word = (
                     self.settings.get("pro_word", "???") or "???"
@@ -3197,36 +3214,84 @@ class VoiceAssistant:
                     self.settings.get("selection_word", "выделить") or "выделить"
                 ).strip().lower()
 
-                if len(words) > 0:
-                    if words[0] == selection_word:
-                        use_selected_text = True
-                        if len(words) > 1:
-                            if words[1] == pro_word:
-                                use_pro_model = True
-                                words_to_skip = 2
-                                log_message("Включено условие 'Выделить Pro'")
-                            elif words[1] == flash_word:
-                                use_flash_model = True
-                                words_to_skip = 2
-                                log_message("Включено условие 'Выделить Flash'")
-                        if words_to_skip == 0:  # если только "Выделить"
-                            use_pro_model = True  # по умолчанию Pro
-                            words_to_skip = 1
-                            log_message(
-                                "Включено условие 'Выделить' (по умолчанию Pro)"
-                            )
-                    elif words[0] == pro_word:
+                prompts = self.settings.get("gemini_prompts", {})
+                profile_lookup = (
+                    {name.strip().lower(): name for name in prompts.keys()}
+                    if isinstance(prompts, dict)
+                    else {}
+                )
+
+                # --- Обработка выделения (отдельный режим) ---
+                if first_word == selection_word:
+                    use_selected_text = True
+                    words_to_skip = first_idx + 1
+                    next_idx, next_word = _next_meaningful(words_to_skip)
+                    if next_idx is not None and next_word:
+                        if next_word == pro_word:
+                            use_pro_model = True
+                            words_to_skip = next_idx + 1
+                            log_message("Включено условие 'Выделить Pro'")
+                        elif next_word == flash_word:
+                            use_flash_model = True
+                            use_pro_model = False
+                            words_to_skip = next_idx + 1
+                            log_message("Включено условие 'Выделить Flash'")
+                    if words_to_skip == first_idx + 1:  # только слово выделения
                         use_pro_model = True
-                        words_to_skip = 1
-                        log_message("Включено условие Gemini Pro")
-                    elif words[0] == flash_word:
-                        use_flash_model = True
-                        words_to_skip = 1
-                        log_message("Включено условие Gemini Flash")
+                        log_message("Включено условие 'Выделить' (по умолчанию Pro)")
+                else:
+                    # --- Обработка профиля промпта ---
+                    profile_match = profile_lookup.get(first_word)
+                    if profile_match:
+                        prompt_text = self._apply_prompt_profile(profile_match)
+                        if prompt_text is not None:
+                            active_profile_name = profile_match
+                            words_to_skip = first_idx + 1
+
+                    if active_profile_name:
+                        profile_lower = active_profile_name.strip().lower()
+                        if profile_lower == "диктовка":
+                            use_flash_model = True
+                            use_pro_model = False
+                            log_message("Профиль 'Диктовка' активирован → модель Flash по умолчанию")
+                        elif profile_lower == "ассистент":
+                            use_pro_model = True
+                            log_message("Профиль 'Ассистент' активирован → модель Pro по умолчанию")
+
+                        # Ищем следующее значимое слово (пропуская знаки препинания) для выбора модели
+                        next_idx, next_word = _next_meaningful(words_to_skip)
+                        if next_idx is not None and next_word:
+                            if next_word == pro_word:
+                                if profile_lower == "диктовка":
+                                    log_message("Профиль 'Диктовка' всегда использует Flash, команда Pro проигнорирована")
+                                else:
+                                    use_pro_model = True
+                                    use_flash_model = False
+                                    log_message(f"Профиль '{active_profile_name}' с командой Pro")
+                                words_to_skip = next_idx + 1
+                            elif next_word == flash_word:
+                                use_flash_model = True
+                                use_pro_model = False
+                                words_to_skip = next_idx + 1
+                                log_message(f"Профиль '{active_profile_name}' с командой Flash")
+
+                        if profile_lower == "диктовка":
+                            use_flash_model = True
+                            use_pro_model = False
+                    else:
+                        # --- Прямые переключатели без профиля ---
+                        if first_word == pro_word:
+                            use_pro_model = True
+                            words_to_skip = first_idx + 1
+                            log_message("Включено условие Gemini Pro")
+                        elif first_word == flash_word:
+                            use_flash_model = True
+                            words_to_skip = first_idx + 1
+                            log_message("Включено условие Gemini Flash")
 
                 if words_to_skip > 0:
                     final_text = " ".join(
-                        final_text.strip().split()[words_to_skip:]
+                        raw_words[words_to_skip:]
                     )
 
                 self._handle_final_text(
@@ -3235,6 +3300,7 @@ class VoiceAssistant:
                     use_pro=use_pro_model,
                     use_flash=use_flash_model,
                     use_selection=use_selected_text,
+                    active_profile=active_profile_name,
                 )
             else:
                 log_message("Ошибка: Whisper вернул пустой результат")
@@ -3253,6 +3319,29 @@ class VoiceAssistant:
             threading.Timer(
                 2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
             ).start()
+
+    def _apply_prompt_profile(self, profile_name):
+        prompts = self.settings.get("gemini_prompts", {})
+        if not isinstance(prompts, dict):
+            log_message("Невозможно применить профиль: список промптов отсутствует или повреждён")
+            return None
+
+        prompt_text = prompts.get(profile_name)
+        if prompt_text is None:
+            log_message(f"Профиль промпта '{profile_name}' не найден")
+            return None
+
+        self.settings["gemini_selected_prompt"] = profile_name
+        self.settings["gemini_prompt"] = prompt_text
+
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=2, ensure_ascii=False)
+            log_message(f"Активирован профиль промпта: {profile_name}")
+        except Exception as e:
+            log_message(f"Не удалось сохранить профиль '{profile_name}': {e}")
+
+        return prompt_text
 
     def _describe_model(self, model_name, thinking_level):
         level = (thinking_level or "low").lower()
@@ -3519,6 +3608,7 @@ class VoiceAssistant:
         use_pro=False,
         use_flash=False,
         use_selection=False,
+        active_profile=None,
     ):
         """Обработка финального текста с отправкой в Gemini"""
         if not isinstance(text, str):
@@ -3546,8 +3636,12 @@ class VoiceAssistant:
                     log_message("Режим выделения активен, но текст не получен")
 
             is_direct_command = (
-                use_pro or use_flash or (use_selection and selected_text)
+                (use_selection and selected_text)
+                or ((use_pro or use_flash) and not active_profile)
             )
+
+            if active_profile:
+                log_message(f"Используется профиль промпта '{active_profile}'")
 
             if use_selection and selected_text:
                 selection_instruction = whisper_text or "Отредактируй выделенный текст"
