@@ -84,6 +84,7 @@ from PySide6.QtCore import (
     QSize,
     QPropertyAnimation,
     QEasingCurve,
+    QEvent,
     Signal,
     QObject,
     QRect,
@@ -201,6 +202,19 @@ HISTORY_FILE = os.path.join(EXE_DIR, "speech_history.txt")
 LOG_FILE = os.path.join(EXE_DIR, "gemini_voice_assistant.log")
 SETTINGS_FILE = os.path.join(EXE_DIR, "settings.json")
 WHISPER_MODELS_DIR = get_models_directory()
+VERSION_FILE = os.path.join(EXE_DIR, "VERSION")
+
+
+def _read_app_version():
+    try:
+        with open(VERSION_FILE, "r", encoding="utf-8") as f:
+            version = f.read().strip()
+            return version or "dev"
+    except Exception:
+        return "dev"
+
+
+APP_VERSION = _read_app_version()
 
 
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -210,7 +224,9 @@ LANGUAGE = "ru"
 
 DEFAULT_SETTINGS = {
     "whisper_model": "small",
-    "thinking_enabled": False,
+    "thinking_enabled": False,  # legacy
+    "gemini3_thinking_level": "high",  # "high" | "low"
+    "gemini25_flash_mode": "thinking",  # "thinking" | "fast"
     "proxy_enabled": False,
     "proxy_address": "127.0.0.1",
     "proxy_port": "10808",
@@ -272,6 +288,15 @@ MODEL_FALLBACKS = {
     "gemini-2.5-pro": "gemini-2.5-flash",
 }
 
+MODEL_DISPLAY_NAMES = {
+    ("gemini-3-pro-preview", "high"): "Gemini 3 Pro High",
+    ("gemini-3-pro-preview", "low"): "Gemini 3 Pro Low",
+    ("gemini-2.5-pro", "high"): "Gemini 2.5 Pro",
+    ("gemini-2.5-pro", "low"): "Gemini 2.5 Pro",
+    ("gemini-2.5-flash", "high"): "Gemini 2.5 Flash thinking",
+    ("gemini-2.5-flash", "low"): "Gemini 2.5 Flash",
+}
+
 COLORS = {
     "bg_main": "#17212B",
     "bg_dark": "#0E1621",
@@ -291,6 +316,11 @@ SOUND_SCHEMES = {
     "Мелодичные": {"start": (1000, 150), "stop": (500, 150), "error": (300, 300)},
     "Отключены": {},
 }
+
+class GeminiCancelledError(Exception):
+    """?????????? ??? ?????? ?????? ????????? Gemini."""
+
+
 
 
 # --- Логирование ---
@@ -523,7 +553,7 @@ class ModernWindow(QMainWindow):
         self.resize_margin = 12
         self.is_programmatic_resize = False
 
-        self.setWindowTitle("Gemini Voice Assistant")
+        self.setWindowTitle(f"Gemini Voice Assistant v{APP_VERSION}")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -612,6 +642,17 @@ class ModernWindow(QMainWindow):
         self.initial_geometry = QRect()
         self._update_hover_cursor(event.position().toPoint())
         super().mouseReleaseEvent(event)
+
+    def eventFilter(self, obj, event):
+        if (
+            obj is getattr(self, "toggle_settings_button", None)
+            and event.type() == QEvent.Type.MouseButtonPress
+        ):
+            if event.button() == Qt.MouseButton.RightButton:
+                if self.assistant.cancel_gemini_processing():
+                    event.accept()
+                    return True
+        return super().eventFilter(obj, event)
 
     def _detect_resize_edges(self, pos: QPoint):
         margin = getattr(self, "resize_margin", 12)
@@ -737,7 +778,7 @@ class ModernWindow(QMainWindow):
         self.central_widget.setObjectName("centralWidget")
         self.setCentralWidget(self.central_widget)
 
-        self.title_label = QLabel("Gemini Voice Assistant")
+        self.title_label = QLabel(f"Gemini Voice Assistant v{APP_VERSION}")
         self.title_label.setObjectName("titleLabel")
         self.status_label = QLabel("Готов к работе")
         self.status_label.setObjectName("statusLabel")
@@ -767,6 +808,7 @@ class ModernWindow(QMainWindow):
         self.toggle_settings_button.setObjectName("toggleButton")
         self.toggle_settings_button.setFixedSize(24, 24)
         self.toggle_settings_button.setFlat(True)
+        self.toggle_settings_button.installEventFilter(self)
 
         self.hide_to_tray_button = QPushButton("▶")
         self.hide_to_tray_button.setObjectName("hideButton")
@@ -1115,9 +1157,33 @@ class ModernWindow(QMainWindow):
 
         gemini_group = QGroupBox("Gemini")
         gemini_layout = QVBoxLayout(gemini_group)
-        self.thinking_check = QCheckBox("Режим Thinking")
-        self.thinking_check.setChecked(self.assistant.settings.get("thinking_enabled"))
-        gemini_layout.addWidget(self.thinking_check)
+
+        g3_group = QGroupBox("Gemini 3.0")
+        g3_layout = QHBoxLayout(g3_group)
+        self.g3_high_check = QCheckBox("High")
+        self.g3_low_check = QCheckBox("Low")
+        g3_layout.addWidget(self.g3_high_check)
+        g3_layout.addWidget(self.g3_low_check)
+        g3_level = (self.assistant.settings.get("gemini3_thinking_level") or "high").lower()
+        self.g3_high_check.setChecked(g3_level == "high")
+        self.g3_low_check.setChecked(g3_level == "low")
+        if not (self.g3_high_check.isChecked() or self.g3_low_check.isChecked()):
+            self.g3_high_check.setChecked(True)
+        gemini_layout.addWidget(g3_group)
+
+        g25_group = QGroupBox("Gemini 2.5 Flash")
+        g25_layout = QHBoxLayout(g25_group)
+        self.g25_fast_check = QCheckBox("Быстрый")
+        self.g25_thinking_check = QCheckBox("Thinking")
+        g25_layout.addWidget(self.g25_fast_check)
+        g25_layout.addWidget(self.g25_thinking_check)
+        g25_mode = (self.assistant.settings.get("gemini25_flash_mode") or "thinking").lower()
+        self.g25_thinking_check.setChecked(g25_mode == "thinking")
+        self.g25_fast_check.setChecked(g25_mode == "fast")
+        if not (self.g25_fast_check.isChecked() or self.g25_thinking_check.isChecked()):
+            self.g25_thinking_check.setChecked(True)
+        gemini_layout.addWidget(g25_group)
+
         layout.addWidget(gemini_group)
 
         proxy_group = QGroupBox("Прокси")
@@ -1688,10 +1754,13 @@ class ModernWindow(QMainWindow):
         self.assistant.ui_signals.request_hide_window.connect(self.hide)
 
         self.whisper_combo.currentTextChanged.connect(self.on_model_changed)
-        self.thinking_check.stateChanged.connect(self.on_thinking_changed)
         self.proxy_check.stateChanged.connect(self.on_proxy_changed)
         self.proxy_addr_edit.editingFinished.connect(self.on_proxy_addr_changed)
         self.proxy_port_edit.editingFinished.connect(self.on_proxy_port_changed)
+        self.g3_high_check.stateChanged.connect(self.on_g3_high_changed)
+        self.g3_low_check.stateChanged.connect(self.on_g3_low_changed)
+        self.g25_fast_check.stateChanged.connect(self.on_g25_fast_changed)
+        self.g25_thinking_check.stateChanged.connect(self.on_g25_thinking_changed)
 
         self.win_shift_normal.toggled.connect(self.on_win_shift_mode_changed)
         self.win_shift_continuous.toggled.connect(self.on_win_shift_mode_changed)
@@ -1946,11 +2015,52 @@ class ModernWindow(QMainWindow):
             f"Запуск свернутым {status}", COLORS["accent"], False
         )
 
-    def on_thinking_changed(self, state):
-        enabled = bool(state)
-        self.assistant.save_setting("thinking_enabled", enabled)
-        status = "включен" if enabled else "выключен"
-        self.assistant.show_status(f"Режим Thinking {status}", COLORS["accent"], False)
+    def _set_g3_level(self, level):
+        level = "high" if level == "high" else "low"
+        self.g3_high_check.blockSignals(True)
+        self.g3_low_check.blockSignals(True)
+        self.g3_high_check.setChecked(level == "high")
+        self.g3_low_check.setChecked(level == "low")
+        self.g3_high_check.blockSignals(False)
+        self.g3_low_check.blockSignals(False)
+        self.assistant.save_setting("gemini3_thinking_level", level)
+        self.assistant.show_status(f"Gemini 3.0 thinking: {level}", COLORS["accent"], False)
+
+    def _set_g25_mode(self, mode):
+        mode = "thinking" if mode == "thinking" else "fast"
+        self.g25_fast_check.blockSignals(True)
+        self.g25_thinking_check.blockSignals(True)
+        self.g25_fast_check.setChecked(mode == "fast")
+        self.g25_thinking_check.setChecked(mode == "thinking")
+        self.g25_fast_check.blockSignals(False)
+        self.g25_thinking_check.blockSignals(False)
+        self.assistant.save_setting("gemini25_flash_mode", mode)
+        status = "Thinking" if mode == "thinking" else "Быстрый"
+        self.assistant.show_status(f"Gemini 2.5 Flash: {status}", COLORS["accent"], False)
+
+    def on_g3_high_changed(self, state):
+        if state:
+            self._set_g3_level("high")
+        elif not self.g3_low_check.isChecked():
+            self._set_g3_level("high")
+
+    def on_g3_low_changed(self, state):
+        if state:
+            self._set_g3_level("low")
+        elif not self.g3_high_check.isChecked():
+            self._set_g3_level("low")
+
+    def on_g25_fast_changed(self, state):
+        if state:
+            self._set_g25_mode("fast")
+        elif not self.g25_thinking_check.isChecked():
+            self._set_g25_mode("fast")
+
+    def on_g25_thinking_changed(self, state):
+        if state:
+            self._set_g25_mode("thinking")
+        elif not self.g25_fast_check.isChecked():
+            self._set_g25_mode("thinking")
 
     def on_proxy_changed(self, state):
         enabled = bool(state)
@@ -2099,7 +2209,7 @@ class ModernWindow(QMainWindow):
         self.record_icon = self.create_colored_icon(COLORS["record"])
 
         self.tray_icon.setIcon(self.default_icon)
-        self.tray_icon.setToolTip("Gemini Voice Assistant")
+        self.tray_icon.setToolTip(f"Gemini Voice Assistant v{APP_VERSION}")
 
         tray_menu = QMenu()
         show_action = QAction("Показать", self)
@@ -2428,6 +2538,13 @@ class VoiceAssistant:
         self.pressed_keys = set()
         self.ui_signals = None
         self.start_time = 0
+        self._gemini_cancel_event = threading.Event()
+        self._task_lock = threading.Lock()
+        self._current_task_id = 0
+        self._task_finalized = False
+        self._current_task_text = ""
+        self._current_task_insert_text = False
+        self._is_gemini_processing = False
         self.settings = self.load_settings()
         thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
         self._supports_thinking_level = "thinking_level" in thinking_fields
@@ -2459,6 +2576,7 @@ class VoiceAssistant:
 
         self._update_cached_settings()
         self.setup_audio()
+        self.client = None
         self.setup_gemini()
 
         # ИСПРАВЛЕНО: НЕ загружаем модель автоматически
@@ -2544,6 +2662,29 @@ class VoiceAssistant:
                 log_message("Настройки сохранены после миграции на Gemini 3.")
             except Exception as e:
                 log_message(f"Не удалось сохранить настройки после миграции: {e}")
+        # Новые ключи для управления thinking
+        extra_updated = False
+        if "gemini3_thinking_level" not in settings:
+            settings["gemini3_thinking_level"] = (
+                "high" if settings.get("thinking_enabled") else "low"
+            )
+            extra_updated = True
+        if "gemini25_flash_mode" not in settings:
+            settings["gemini25_flash_mode"] = "thinking"
+            extra_updated = True
+        if settings.get("gemini3_thinking_level") not in ["high", "low"]:
+            settings["gemini3_thinking_level"] = "high"
+            extra_updated = True
+        if settings.get("gemini25_flash_mode") not in ["thinking", "fast"]:
+            settings["gemini25_flash_mode"] = "thinking"
+            extra_updated = True
+        if extra_updated:
+            try:
+                with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, ensure_ascii=False, indent=2)
+                log_message("Доп. миграции настроек thinking применены.")
+            except Exception as e:
+                log_message(f"Ошибка записи настроек после миграции thinking: {e}")
 
     def save_setting(self, key, value):
         self.settings[key] = value
@@ -2604,10 +2745,13 @@ class VoiceAssistant:
             log_message("Прокси для Gemini не используется")
 
         try:
+            # Без усилий по тайм-ауту, используем дефолтный httpx (как было раньше)
             self.client = genai.Client(api_key=api_key)
             log_message("Gemini клиент инициализирован")
         except Exception as e:
+            self.client = None
             log_message(f"Ошибка инициализации Gemini: {e}")
+            log_message(traceback.format_exc())
 
     def reinitialize_gemini(self):
         """Переинициализация клиента Gemini для применения новых настроек"""
@@ -3110,66 +3254,123 @@ class VoiceAssistant:
                 2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
             ).start()
 
+    def _describe_model(self, model_name, thinking_level):
+        level = (thinking_level or "low").lower()
+        key = (model_name, level)
+        return MODEL_DISPLAY_NAMES.get(key, f"{model_name} ({level})")
+
+    def _choose_thinking_level(self, model_name, use_pro=False, use_flash=False):
+        name = (model_name or "").lower()
+        if name.startswith("gemini-3"):
+            return (self.settings.get("gemini3_thinking_level") or "high").lower()
+
+        if name.startswith("gemini-2.5-pro"):
+            return "high"  # thinking выключить нельзя, используем динамику
+
+        if name.startswith("gemini-2.5-flash"):
+            mode = (self.settings.get("gemini25_flash_mode") or "thinking").lower()
+            return "high" if mode == "thinking" else "low"
+
+        if use_pro:
+            return (self.settings.get("gemini3_thinking_level") or "high").lower()
+        if use_flash:
+            mode = (self.settings.get("gemini25_flash_mode") or "thinking").lower()
+            return "high" if mode == "thinking" else "low"
+
+        # Фолбэк на старую настройку
+        return "high" if self.settings.get("thinking_enabled") else "low"
+
     def _generate_with_fallback(self, model_name, prompt, thinking_level):
         """Отправляет запрос к Gemini, понижая модель при ошибках или недоступности."""
         attempted = set()
         current_model = model_name
-        current_level = thinking_level
+        current_level = thinking_level or "low"
 
         while True:
+            if self._gemini_cancel_event.is_set():
+                raise GeminiCancelledError("Gemini generation cancelled")
+
             attempted.add(current_model)
-            config = self._build_generation_config(current_level)
+            config = self._build_generation_config(current_level, current_model)
 
             try:
                 response = self.client.models.generate_content(
                     model=current_model, contents=prompt, config=config
                 )
                 return response, current_model, current_level
+            except GeminiCancelledError:
+                raise
             except Exception as e:
+                display_name = self._describe_model(current_model, current_level)
+                log_message(f"Ошибка {display_name}: {e}")
                 fallback_model = MODEL_FALLBACKS.get(current_model)
                 should_fallback = (
                     fallback_model
                     and fallback_model not in attempted
                     and self._should_try_fallback(e)
+                    and not self._gemini_cancel_event.is_set()
                 )
 
                 if should_fallback:
-                    error_text = str(e)
-                    log_message(
-                        f"⚠️ Модель '{current_model}' недоступна ({error_text}). "
-                        f"Переключаюсь на '{fallback_model}'."
+                    fallback_display = self._describe_model(
+                        fallback_model, current_level
                     )
                     self.show_status(
-                        f"{current_model} не отвечает, пробуем {fallback_model}",
+                        f"{display_name} недоступна → {fallback_display}",
                         COLORS["btn_warning"],
                         True,
                     )
-                    if "flash" in fallback_model:
-                        current_level = "high"
-                    elif "pro" in fallback_model:
-                        current_level = "high"
+                    log_message(
+                        f"{display_name} недоступна ({e}). Переключаемся на {fallback_display}"
+                    )
                     current_model = fallback_model
+                    current_level = self._choose_thinking_level(current_model)
                     continue
 
                 raise
 
-    def _determine_thinking_level(self, use_pro, use_flash):
-        """���������� желаемый thinking_level ��� Gemini 3."""
-        if use_flash:
-            return "low"
-        if use_pro or self.settings.get("thinking_enabled"):
-            return "high"
-        return "low"
+    def _determine_thinking_level(self, use_pro, use_flash, model_name=None):
+        """Совместимость: выбирает уровень на основе модели и настроек."""
+        return self._choose_thinking_level(model_name or "", use_pro, use_flash)
 
-    def _build_generation_config(self, thinking_level):
-        """�������� ���-���� ��� Gemini � �������� thinking_level."""
-        level = thinking_level or "high"
-        if self._supports_thinking_level:
-            thinking_config = types.ThinkingConfig(thinking_level=level)
-        else:
+    def _build_generation_config(self, thinking_level, model_name):
+        """Собирает конфиг с учетом особенностей моделей 3.x и 2.5."""
+        level = (thinking_level or "high").lower()
+        supports_level = getattr(self, "_supports_thinking_level", False)
+
+        # Gemini 3.x: используем thinking_level (high / low)
+        if model_name.startswith("gemini-3"):
+            if supports_level:
+                return types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_level=level)
+                )
             budget = -1 if level == "high" else 0
-            thinking_config = types.ThinkingConfig(thinking_budget=budget)
-        return types.GenerateContentConfig(thinking_config=thinking_config)
+            return types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=budget)
+            )
+
+        # Gemini 2.5 Pro: думание отключить нельзя, всегда динамическое (-1)
+        if model_name.startswith("gemini-2.5-pro"):
+            return types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=-1)
+            )
+
+        # Gemini 2.5 Flash: thinking_level не поддерживается, используем budget
+        if model_name.startswith("gemini-2.5-flash"):
+            budget = -1 if level == "high" else 0  # high -> динамика, low -> выкл.
+            return types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=budget)
+            )
+
+        # Фолбэк для прочих моделей: сначала пробуем thinking_level, потом budget
+        if supports_level:
+            return types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level=level)
+            )
+        budget = -1 if level == "high" else 0
+        return types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=budget)
+        )
 
     def _should_try_fallback(self, error):
         """Понимает, стоит ли пробовать резервную модель после ошибки."""
@@ -3205,6 +3406,112 @@ class VoiceAssistant:
 
         return False
 
+    def _begin_gemini_task(self, whisper_text, insert_text):
+        text = (whisper_text or "").strip()
+        with self._task_lock:
+            self._current_task_id += 1
+            self._task_finalized = False
+            self._current_task_text = text
+            self._current_task_insert_text = insert_text
+            self._is_gemini_processing = True
+            self._gemini_cancel_event.clear()
+            return self._current_task_id
+
+    def _finalize_task_output(
+        self,
+        final_text,
+        insert_text,
+        task_id,
+        status_text=None,
+        status_color=None,
+        spinning=False,
+    ):
+        final_text = (final_text or "").strip()
+        with self._task_lock:
+            if task_id != self._current_task_id or self._task_finalized:
+                return False
+            insert = (
+                self._current_task_insert_text
+                if insert_text is None
+                else insert_text
+            )
+            self._task_finalized = True
+            self._is_gemini_processing = False
+
+        if self.audio_buffer:
+            log_message(
+                f"Сбрасываем буфер сегментов Whisper (элементов: {len(self.audio_buffer)})"
+            )
+            self.audio_buffer.clear()
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            history_logger.info(f"{timestamp}\n{final_text}\n---")
+            log_message("Запись добавлена в историю")
+        except Exception as e:
+            log_message(f"Ошибка записи в историю: {e}")
+
+        if self.ui_signals:
+            self.ui_signals.history_updated.emit()
+
+        if insert:
+            try:
+                pyperclip.copy(final_text)
+                log_message("Текст сохранен в буфер обмена")
+            except Exception as e:
+                log_message(f"Ошибка копирования в буфер: {e}")
+
+            ahk_exe = resource_path("paste_text.exe")
+            if os.path.exists(ahk_exe):
+                try:
+                    subprocess.Popen(
+                        [ahk_exe, final_text], creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    log_message("Текст отправлен через AHK")
+                except Exception as e:
+                    log_message(f"Ошибка AHK: {e}")
+            else:
+                log_message("AHK не найден, текст оставлен в буфере обмена")
+
+            if self.ui_signals:
+                self.ui_signals.request_hide_window.emit()
+
+            message = status_text or f"Готово! ({len(final_text)} симв.)"
+            self.show_status(message, status_color or COLORS["accent"], False)
+            total_time = time.time() - self.start_time
+            log_message(f"Полный цикл от старта до вставки: {total_time:.2f}с.")
+            log_separator()
+            threading.Timer(
+                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+            ).start()
+        else:
+            if status_text:
+                self.show_status(status_text, status_color or COLORS["accent"], spinning)
+        return True
+
+    def cancel_gemini_processing(self):
+        with self._task_lock:
+            if not self._is_gemini_processing:
+                return False
+            task_id = self._current_task_id
+            text = self._current_task_text
+            insert_text = self._current_task_insert_text
+            self._gemini_cancel_event.set()
+
+        log_message("🛑 Отмена Gemini пользователем — вставляем текст Whisper.")
+        self.show_status(
+            "Отмена Gemini, вставляю Whisper...", COLORS["btn_warning"], True
+        )
+        self._finalize_task_output(
+            text,
+            insert_text,
+            task_id,
+            status_text="Whisper вставлен после отмены",
+            status_color=COLORS["accent"],
+            spinning=False,
+        )
+        return True
+
     def _handle_final_text(
         self,
         text,
@@ -3219,13 +3526,14 @@ class VoiceAssistant:
             return
 
         # Обрезаем текст до максимальной длины и удаляем лишние пробелы
-        text = (text or "").strip()
-        if not text and not use_selection:
+        whisper_text = (text or "").strip()
+        if not whisper_text and not use_selection:
             log_message("ОШИБКА: Пустая команда и отсутствует выделенный текст.")
             return
-        text = text[:10000]
+        whisper_text = whisper_text[:10000]
 
-        final_text = text
+        task_id = self._begin_gemini_task(whisper_text, insert_text)
+
         try:
             selected_text = ""
             if use_selection:
@@ -3242,18 +3550,18 @@ class VoiceAssistant:
             )
 
             if use_selection and selected_text:
-                selection_instruction = text or "Отредактируй выделенный текст"
+                selection_instruction = whisper_text or "Отредактируй выделенный текст"
                 prompt = (
                     f'Выделенный текст:\n"{selected_text}"\n\n'
                     f"Задача: {selection_instruction}"
                 )
                 log_message("Промпт сформирован с выделенным текстом")
             elif is_direct_command:
-                prompt = text
+                prompt = whisper_text
                 log_message("Промпт сформирован как прямая команда")
             else:
                 user_prompt = self.settings.get("gemini_prompt")
-                prompt = f"{user_prompt} Вот текст: '{text}'"
+                prompt = f"{user_prompt} Вот текст: '{whisper_text}'"
 
             if use_pro:
                 model_name = self.settings.get("gemini_model_pro")
@@ -3262,83 +3570,69 @@ class VoiceAssistant:
             else:  # По умолчанию, если нет команд
                 model_name = self.settings.get("gemini_model_default")
 
-            thinking_level = self._determine_thinking_level(use_pro, use_flash)
+            thinking_level = self._determine_thinking_level(
+                use_pro, use_flash, model_name=model_name
+            )
+            display_name = self._describe_model(model_name, thinking_level)
             log_message(
-                f"Отправка в Gemini (модель: {model_name}, thinking_level: {thinking_level})"
+                f"Отправка в {display_name} (thinking_level: {thinking_level})"
             )
 
-            if use_pro:
-                self.show_status("Gemini Pro...", COLORS["accent"], True)
-            elif use_flash:
-                self.show_status("Gemini Flash...", COLORS["accent"], True)
-            else:
-                self.show_status("Обработка Gemini...", COLORS["accent"], True)
+            if not self.client:
+                raise RuntimeError("Gemini client не инициализирован")
+
+            if self._gemini_cancel_event.is_set():
+                raise GeminiCancelledError("Отмена перед запросом")
+
+            self.show_status(f"{display_name}...", COLORS["accent"], True)
 
             gemini_start = time.time()
             response, used_model, used_level = self._generate_with_fallback(
                 model_name, prompt, thinking_level
             )
-            final_text = response.text.strip()
+
+            if self._gemini_cancel_event.is_set():
+                raise GeminiCancelledError("Отмена после ответа Gemini")
+
+            used_display = self._describe_model(used_model, used_level)
+            response_text = (getattr(response, "text", "") or "").strip()
+            final_text = response_text or whisper_text
             gemini_time = time.time() - gemini_start
             log_message(
-                f"Gemini обработка завершена за {gemini_time:.2f}с. "
-                f"(модель: {used_model}, thinking_level: {used_level})"
+                f"Gemini обработка завершена за {gemini_time:.2f}с. (модель: {used_display})"
             )
             log_message(f"Итоговый текст: {final_text}")
 
+            self._finalize_task_output(
+                final_text,
+                insert_text,
+                task_id,
+                status_text=f"{used_display} готов",
+                status_color=COLORS["accent"],
+                spinning=False,
+            )
+
+        except GeminiCancelledError:
+            log_message("Запрос Gemini отменён, используем текст Whisper.")
+            self._finalize_task_output(
+                self._current_task_text or whisper_text,
+                insert_text,
+                task_id,
+                status_text="Whisper вставлен после отмены",
+                status_color=COLORS["accent"],
+                spinning=False,
+            )
         except Exception as e:
             log_message(f"ОШИБКА Gemini: {e}\n{traceback.format_exc()}")
-            self.show_status("Ошибка Gemini", COLORS["btn_warning"], False)
-            if use_pro:
-                final_text = (
-                    "Gemini Pro недоступна или не отвечает. "
-                    "Попробуйте выполнить запрос с моделью Flash."
-                )
-            else:
-                final_text = text
-
-        if self.audio_buffer:
-            log_message(f"Очищаем буфер (было {len(self.audio_buffer)} сегментов)")
-            self.audio_buffer.clear()
-
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            history_logger.info(f"{timestamp}\n{final_text}\n---")
-            log_message("Текст сохранен в историю")
-        except Exception as e:
-            log_message(f"Ошибка записи в историю: {e}")
-
-        if self.ui_signals:
-            self.ui_signals.history_updated.emit()
-
-        if insert_text:
-            pyperclip.copy(final_text)
-            log_message("Текст скопирован в буфер обмена")
-
-            ahk_exe = resource_path("paste_text.exe")
-            if os.path.exists(ahk_exe):
-                try:
-                    subprocess.Popen(
-                        [ahk_exe, final_text], creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    log_message("Текст вставлен через AHK")
-                except Exception as e:
-                    log_message(f"Ошибка AHK: {e}")
-            else:
-                log_message("AHK не найден, текст только в буфере обмена")
-
-            if self.ui_signals:
-                self.ui_signals.request_hide_window.emit()
-
-            self.show_status(
-                f"Готово! ({len(final_text)} симв.)", COLORS["accent"], False
+            self.show_status("Ошибка Gemini — вставляю Whisper", COLORS["btn_warning"], False)
+            self._finalize_task_output(
+                self._current_task_text or whisper_text,
+                insert_text,
+                task_id,
+                status_text="Whisper вставлен",
+                status_color=COLORS["accent"],
+                spinning=False,
             )
-            total_time = time.time() - self.start_time
-            log_message(f"Общее время от нажатия до вставки: {total_time:.2f}с.")
-            log_separator()
-            threading.Timer(
-                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
-            ).start()
 
     def show_status(self, txt, color, spinning=False):
         if self.ui_signals:
@@ -3508,7 +3802,7 @@ oLink.Save
 def main():
     try:
         log_separator()
-        log_message("Gemini Voice Assistant запущен")
+        log_message(f"Gemini Voice Assistant v{APP_VERSION} запущен")
         log_separator()
 
         app = QApplication(sys.argv)
