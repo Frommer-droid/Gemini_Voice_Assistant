@@ -3296,6 +3296,10 @@ class VoiceAssistant:
             # Очищаем буфер, так как команда выполнена
             self.audio_buffer.clear()
             
+            # Сворачиваем окно обратно
+            if self.ui_signals:
+                self.ui_signals.request_hide_window.emit()
+            
             threading.Timer(
                 2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
             ).start()
@@ -3400,6 +3404,10 @@ class VoiceAssistant:
             
             # Очищаем буфер, так как команда выполнена
             self.audio_buffer.clear()
+            
+            # Сворачиваем окно обратно
+            if self.ui_signals:
+                self.ui_signals.request_hide_window.emit()
             
             threading.Timer(
                 2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
