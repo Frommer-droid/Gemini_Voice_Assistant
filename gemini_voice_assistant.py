@@ -13,6 +13,7 @@ import warnings
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 import threading
+import webbrowser
 import time
 import datetime
 import logging
@@ -315,6 +316,35 @@ SOUND_SCHEMES = {
     "Тихие": {"start": (600, 50), "stop": (500, 50), "error": (400, 100)},
     "Мелодичные": {"start": (1000, 150), "stop": (500, 150), "error": (300, 300)},
     "Отключены": {},
+}
+
+WEBSITE_URLS = {
+    "гугл": "https://google.com",
+    "google": "https://google.com",
+    "ютуб": "https://youtube.com",
+    "youtube": "https://youtube.com",
+    "яндекс": "https://yandex.ru",
+    "yandex": "https://yandex.ru",
+    "вк": "https://vk.com",
+    "вконтакте": "https://vk.com",
+    "vk": "https://vk.com",
+    "телеграм": "https://web.telegram.org",
+    "telegram": "https://web.telegram.org",
+    "почта": "https://mail.google.com",
+    "gmail": "https://mail.google.com",
+    "новости": "https://dzen.ru/news",
+    "переводчик": "https://translate.google.com",
+    "карты": "https://maps.google.com",
+    "погода": "https://yandex.ru/pogoda",
+    "чат": "https://chatgpt.com",
+    "chatgpt": "https://chatgpt.com",
+    "джем": "https://gemini.google.com",
+    "gemini": "https://gemini.google.com",
+    "хабр": "https://habr.com",
+    "гитхаб": "https://github.com",
+    "github": "https://github.com",
+    "рутуб": "https://rutube.ru",
+    "rutube": "https://rutube.ru",
 }
 
 class GeminiCancelledError(Exception):
@@ -3136,6 +3166,82 @@ class VoiceAssistant:
         except Exception as e:
             log_message(f"Ошибка обработки сегмента: {e}\n{traceback.format_exc()}")
 
+    def _handle_website_command(self, text):
+        """
+        Проверяет, является ли текст командой открытия сайта.
+        Если да - открывает сайт и возвращает True.
+        """
+        log_message(f"DEBUG: Проверка на команду сайта. Входной текст: '{text}'")
+        
+        text_lower = text.strip().lower()
+        # Заменяем любую пунктуацию на пробелы и нормализуем пробелы
+        # "Открой, гугл!" -> "открой гугл"
+        text_lower = re.sub(r"[^\w\s]", " ", text_lower)
+        text_lower = " ".join(text_lower.split())
+        
+        log_message(f"DEBUG: Очищенный текст: '{text_lower}'")
+        
+        # Ключевые слова для запуска
+        triggers = ["открой", "открыть", "перейди на", "запусти", "найди"]
+        
+        triggered = False
+        command_body = ""
+        
+        for trigger in triggers:
+            if text_lower.startswith(trigger + " "):
+                triggered = True
+                command_body = text_lower[len(trigger):].strip()
+                log_message(f"DEBUG: Сработал триггер '{trigger}'. Тело команды: '{command_body}'")
+                break
+        
+        # Логируем для отладки, если не сработало, но похоже на команду
+        if not triggered:
+            log_message(f"DEBUG: Триггер не сработал. Проверял триггеры: {triggers}")
+            if any(t in text_lower for t in triggers):
+                 log_message(f"Похоже на команду, но не сработало: '{text_lower}'")
+
+        if not triggered:
+            return False
+            
+        log_message(f"Распознана команда навигации: '{command_body}'")
+        
+        url = None
+        site_name = command_body
+        
+        # 1. Прямой поиск в словаре
+        if site_name in WEBSITE_URLS:
+            url = WEBSITE_URLS[site_name]
+            
+        # 2. Поиск частичного совпадения (если не нашли точного)
+        if not url:
+            for key, val in WEBSITE_URLS.items():
+                if key in site_name: # Например "открой гугл поиск" -> найдет "гугл"
+                    url = val
+                    break
+                    
+        # 3. Если не нашли - ищем в Google
+        if not url:
+            log_message(f"Сайт '{site_name}' не найден в базе, поиск в Google")
+            url = f"https://www.google.com/search?q={site_name}"
+            
+        try:
+            log_message(f"Открываю URL: {url}")
+            webbrowser.open(url)
+            self.show_status(f"Открываю: {site_name}", COLORS["accent"], False)
+            self.play_sound("start") # Звук успеха
+            
+            # Очищаем буфер, так как команда выполнена
+            self.audio_buffer.clear()
+            
+            threading.Timer(
+                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+            ).start()
+            return True
+        except Exception as e:
+            log_message(f"Ошибка открытия URL: {e}")
+            self.show_status("Ошибка браузера", COLORS["btn_warning"], False)
+            return False
+
     def _process_audio_whisper(self, audio_np, is_final_segment=False):
         """Финальная обработка аудио, распознавание и вызов _handle_final_text"""
         self.show_status("Обработка...", COLORS["accent"], True)
@@ -3163,6 +3269,12 @@ class VoiceAssistant:
             )
             log_message(f"==========================================================")
 
+            # --- СТАРЫЙ БЛОК УДАЛЕН ---
+            # if is_final_segment and text:
+            #    if self._handle_website_command(text):
+            #        return
+            # --------------------------
+
             if is_final_segment and text:
                 self.audio_buffer.append(text)
 
@@ -3172,6 +3284,13 @@ class VoiceAssistant:
                 log_message(
                     f"Собран полный текст из {len(self.audio_buffer)} сегментов для Gemini ({len(final_text)} симв.)"
                 )
+
+            # --- НОВОЕ МЕСТО: Проверка команд открытия сайтов (на полном тексте) ---
+            # Проверяем всегда, если есть текст (независимо от режима is_final_segment)
+            if final_text:
+                if self._handle_website_command(final_text):
+                    return
+            # -----------------------------------------------------------------------
 
             if final_text:
                 log_message(
