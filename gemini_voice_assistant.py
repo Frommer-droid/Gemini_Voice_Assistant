@@ -324,6 +324,7 @@ WEBSITE_URLS = {
     "ютуб": "https://youtube.com",
     "youtube": "https://youtube.com",
     "яндекс": "https://yandex.ru",
+    "яндекс почта": "https://mail.yandex.ru",
     "yandex": "https://yandex.ru",
     "вк": "https://vk.com",
     "вконтакте": "https://vk.com",
@@ -3212,16 +3213,15 @@ class VoiceAssistant:
         if site_name in WEBSITE_URLS:
             url = WEBSITE_URLS[site_name]
             
-        # 2. Поиск частичного совпадения (если не нашли точного)
+        # 2. Если не нашли в словаре - спрашиваем у Gemini
         if not url:
-            for key, val in WEBSITE_URLS.items():
-                if key in site_name: # Например "открой гугл поиск" -> найдет "гугл"
-                    url = val
-                    break
-                    
-        # 3. Если не нашли - ищем в Google
-        if not url:
-            log_message(f"Сайт '{site_name}' не найден в базе, поиск в Google")
+            log_message(f"Сайт '{site_name}' не найден в словаре. Спрашиваю у Gemini...")
+            self.show_status("Поиск адреса...", COLORS["accent"], True)
+            url = self._resolve_url_with_gemini(site_name)
+
+        # 3. Если Gemini не дал URL или вернул SEARCH - ищем в Google
+        if not url or url == "SEARCH":
+            log_message(f"Gemini не вернул точный URL, поиск в Google: {site_name}")
             url = f"https://www.google.com/search?q={site_name}"
             
         try:
@@ -3241,6 +3241,49 @@ class VoiceAssistant:
             log_message(f"Ошибка открытия URL: {e}")
             self.show_status("Ошибка браузера", COLORS["btn_warning"], False)
             return False
+
+    def _resolve_url_with_gemini(self, description):
+        """
+        Использует Gemini для определения URL по описанию.
+        Возвращает URL или 'SEARCH' если не уверен.
+        """
+        if not self.client:
+            return "SEARCH"
+            
+        try:
+            model_name = "gemini-2.5-flash" # Используем быструю модель
+            
+            prompt = f"""
+            Ты - умный помощник для навигации. Твоя задача - найти точный URL веб-сайта по описанию пользователя.
+            
+            Описание от пользователя: "{description}"
+            
+            Правила:
+            1. Если ты знаешь точный официальный URL этого сайта, верни ТОЛЬКО его (например: https://example.com).
+            2. Если описание нечеткое или ты не уверен в адресе, верни слово SEARCH.
+            3. Если это запрос на поиск (например "найди картинки котиков"), верни SEARCH.
+            4. Не пиши никаких объяснений, только URL или SEARCH.
+            """
+            
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0, # Максимальная точность
+                )
+            )
+            
+            result = response.text.strip()
+            log_message(f"Gemini URL resolution: '{description}' -> '{result}'")
+            
+            if result.startswith("http") or result.startswith("www"):
+                return result
+            else:
+                return "SEARCH"
+                
+        except Exception as e:
+            log_message(f"Ошибка при определении URL через Gemini: {e}")
+            return "SEARCH"
 
     def _process_audio_whisper(self, audio_np, is_final_segment=False):
         """Финальная обработка аудио, распознавание и вызов _handle_final_text"""
