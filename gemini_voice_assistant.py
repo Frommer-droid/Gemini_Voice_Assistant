@@ -3219,10 +3219,10 @@ class VoiceAssistant:
             self.show_status("Поиск адреса...", COLORS["accent"], True)
             url = self._resolve_url_with_gemini(site_name)
 
-        # 3. Если Gemini не дал URL или вернул SEARCH - ищем в Google
+        # 3. Если Gemini не дал URL или вернул SEARCH - ищем в Яндексе
         if not url or url == "SEARCH":
-            log_message(f"Gemini не вернул точный URL, поиск в Google: {site_name}")
-            url = f"https://www.google.com/search?q={site_name}"
+            log_message(f"Gemini не вернул точный URL, поиск в Яндексе: {site_name}")
+            url = f"https://yandex.ru/search/?text={site_name}"
             
         try:
             log_message(f"Открываю URL: {url}")
