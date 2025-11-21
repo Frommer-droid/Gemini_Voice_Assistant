@@ -348,6 +348,69 @@ WEBSITE_URLS = {
     "rutube": "https://rutube.ru",
 }
 
+LAUNCH_COMMANDS = {
+    # Стандартные Windows-аплеты
+    "калькулятор": "calc",
+    "calculator": "calc",
+    "блокнот": "notepad",
+    "notepad": "notepad",
+    "диспетчер задач": "taskmgr",
+    "task manager": "taskmgr",
+    "панель управления": "control",
+    "control panel": "control",
+    "командная строка": "cmd",
+    "cmd": "cmd",
+    "powershell": "powershell",
+    "проводник": "explorer",
+    "explorer": "explorer",
+    "paint": "mspaint",
+    "пэинт": "mspaint",
+    "пейнт": "mspaint",
+    "редактор реестра": "regedit",
+    "regedit": "regedit",
+    "настройки": "ms-settings:",
+    "settings": "ms-settings:",
+    
+    # Системные инструменты
+    "очистка диска": "cleanmgr",
+    "дефрагментация": "dfrgui",
+    "монитор ресурсов": "resmon",
+    "службы": "services.msc",
+    "диспетчер устройств": "devmgmt.msc",
+    "управление дисками": "diskmgmt.msc",
+    "просмотр событий": "eventvwr.msc",
+    
+    # Популярные программы (будут работать если установлены)
+    "chrome": "chrome",
+    "хром": "chrome",
+    "firefox": "firefox",
+    "файрфокс": "firefox",
+    "edge": "msedge",
+    "эдж": "msedge",
+    "код": "code",
+    "vscode": "code",
+    "visual studio code": "code",
+    "word": "winword",
+    "ворд": "winword",
+    "excel": "excel",
+    "эксель": "excel",
+    "outlook": "outlook",
+    "аутлук": "outlook",
+}
+
+# Паттерны опасных команд для обязательного подтверждения
+DANGEROUS_COMMAND_PATTERNS = [
+    r"\bdel\b", r"\bdelete\b", r"\brm\b", r"\bremove\b",
+    r"\bformat\b", r"\bfdisk\b",
+    r"\breg\s+delete\b", r"\bregedit\b.*\/s\b",
+    r"\btaskkill\b.*\/f\b",
+    r"\brd\b", r"\brmdir\b",
+    r"\bshutdown\b", r"\brestart\b", r"\bперезагрузк\w*\b", r"\bвыключ\w*\b",
+    r"\bpowershell\b.*remove", r"\bpowershell\b.*delete",
+    r"\bудал\w*\b", r"\bформат\w*\b",
+]
+
+
 class GeminiCancelledError(Exception):
     """?????????? ??? ?????? ?????? ????????? Gemini."""
 
@@ -3182,8 +3245,8 @@ class VoiceAssistant:
         
         log_message(f"DEBUG: Очищенный текст: '{text_lower}'")
         
-        # Ключевые слова для запуска
-        triggers = ["открой", "открыть", "перейди на", "запусти", "найди"]
+        # Ключевые слова для навигации - только формы слова "открой"
+        triggers = ["открой", "открыть", "откроем", "открывай"]
         
         triggered = False
         command_body = ""
@@ -3241,6 +3304,204 @@ class VoiceAssistant:
             log_message(f"Ошибка открытия URL: {e}")
             self.show_status("Ошибка браузера", COLORS["btn_warning"], False)
             return False
+
+    def _handle_launch_command(self, text):
+        """
+        Проверяет, является ли текст командой запуска программы/команды.
+        Если да - выполняет команду и возвращает True.
+        """
+        log_message(f"DEBUG: Проверка на команду запуска. Входной текст: '{text}'")
+        
+        text_lower = text.strip().lower()
+        # Заменяем любую пунктуацию на пробелы и нормализуем пробелы
+        text_lower = re.sub(r"[^\w\s]", " ", text_lower)
+        text_lower = " ".join(text_lower.split())
+        
+        log_message(f"DEBUG: Очищенный текст: '{text_lower}'")
+        
+        # Ключевые слова для запуска программ - только формы слова "запусти"
+        triggers = ["запусти", "запустить", "запуск", "запустим", "запускай", "запускаю"]
+        
+        triggered = False
+        command_body = ""
+        
+        for trigger in triggers:
+            if text_lower.startswith(trigger + " "):
+                triggered = True
+                command_body = text_lower[len(trigger):].strip()
+                log_message(f"DEBUG: Сработал триггер '{trigger}'. Тело команды: '{command_body}'")
+                break
+        
+        if not triggered:
+            log_message(f"DEBUG: Триггер не сработал. Проверял триггеры: {triggers}")
+            return False
+            
+        log_message(f"Распознана команда запуска: '{command_body}'")
+        
+        command = None
+        program_name = command_body
+        
+        # 1. Прямой поиск в словаре
+        if program_name in LAUNCH_COMMANDS:
+            command = LAUNCH_COMMANDS[program_name]
+            log_message(f"Команда найдена в словаре: '{command}'")
+            
+        # 2. Если не нашли в словаре - спрашиваем у Gemini
+        if not command:
+            log_message(f"Команда '{program_name}' не найдена в словаре. Спрашиваю у Gemini...")
+            self.show_status("Определение команды...", COLORS["accent"], True)
+            command = self._resolve_command_with_gemini(program_name)
+
+        # 3. Если Gemini не дал команду или вернул UNKNOWN
+        if not command or command == "UNKNOWN":
+            log_message(f"Не удалось определить команду для: {program_name}")
+            self.show_status(f"Команда не найдена: {program_name}", COLORS["btn_warning"], False)
+            self.play_sound("error")
+            threading.Timer(
+                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+            ).start()
+            return True  # Команда обработана, но не выполнена
+        
+        # 4. Проверка на опасность
+        if self._is_dangerous_command(command):
+            log_message(f"ПРЕДУПРЕЖДЕНИЕ: Обнаружена потенциально опасная команда: {command}")
+            # Показываем диалог подтверждения
+            if not self._show_command_confirmation_dialog(command):
+                log_message(f"DANGEROUS COMMAND REJECTED: {command}")
+                self.show_status("Команда отменена", COLORS["btn_warning"], False)
+                self.play_sound("error")
+                threading.Timer(
+                    2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+                ).start()
+                return True
+            else:
+                log_message(f"DANGEROUS COMMAND CONFIRMED: {command}")
+        
+        # 5. Выполнение команды
+        try:
+            log_message(f"COMMAND EXECUTED: {command}")
+            
+            # Используем subprocess для безопасного выполнения
+            import subprocess
+            
+            # Очищаем префикс DANGER: если он есть
+            command = command.replace("DANGER:", "").strip()
+            
+            # Запуск команды
+            if command.startswith("ms-settings:"):
+                # Специальная обработка для настроек Windows
+                os.startfile(command)
+            else:
+                # Обычный запуск через subprocess
+                subprocess.Popen(command, shell=True)
+            
+            self.show_status(f"Запущено: {program_name}", COLORS["accent"], False)
+            self.play_sound("start")  # Звук успеха
+            
+            # Очищаем буфер, так как команда выполнена
+            self.audio_buffer.clear()
+            
+            threading.Timer(
+                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+            ).start()
+            return True
+        except Exception as e:
+            log_message(f"Ошибка выполнения команды '{command}': {e}")
+            self.show_status("Ошибка выполнения", COLORS["btn_warning"], False)
+            self.play_sound("error")
+            threading.Timer(
+                2.0, lambda: self.show_status("Готов к работе", COLORS["accent"], False)
+            ).start()
+            return False
+
+    def _resolve_command_with_gemini(self, description):
+        """
+        Использует Gemini для определения команды по описанию.
+        Возвращает команду или 'UNKNOWN' если не уверен.
+        """
+        if not self.client:
+            return "UNKNOWN"
+            
+        try:
+            model_name = "gemini-2.5-flash"  # Используем быструю модель
+            
+            prompt = f"""
+            Ты - эксперт по Windows командам и программам. Определи точную команду для запуска по описанию пользователя.
+            
+            Описание: "{description}"
+            
+            Правила:
+            1. Верни ТОЛЬКО команду (например: "notepad", "calc", "control", "chrome")
+            2. Если это программа - верни её исполняемое имя или путь
+            3. Если команда может быть опасна (удаление, форматирование, модификация реестра) - верни её, но с префиксом "DANGER:"
+            4. Если не уверен или описание нечёткое - верни "UNKNOWN"
+            5. Не пиши объяснений, только команду
+            
+            Примеры:
+            - "калькулятор" → "calc"
+            - "редактор кода" → "code"
+            - "браузер" → "chrome"
+            - "удали все файлы" → "DANGER:del /f /q *.*"
+            - "что-то непонятное" → "UNKNOWN"
+            """
+            
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,  # Максимальная точность
+                )
+            )
+            
+            result = response.text.strip()
+            log_message(f"Gemini command resolution: '{description}' -> '{result}'")
+            
+            # Если ответ начинается с команды или DANGER или UNKNOWN - возвращаем
+            if result and (result.startswith("DANGER:") or result == "UNKNOWN" or len(result.split()) <= 3):
+                return result
+            else:
+                return "UNKNOWN"
+                
+        except Exception as e:
+            log_message(f"Ошибка при определении команды через Gemini: {e}")
+            return "UNKNOWN"
+
+    def _is_dangerous_command(self, command):
+        """
+        Проверяет, является ли команда потенциально опасной.
+        Возвращает True если команда опасна.
+        """
+        # Проверка префикса от Gemini
+        if command.startswith("DANGER:"):
+            return True
+        
+        # Проверка по паттернам
+        command_lower = command.lower()
+        for pattern in DANGEROUS_COMMAND_PATTERNS:
+            if re.search(pattern, command_lower):
+                return True
+        
+        return False
+
+    def _show_command_confirmation_dialog(self, command):
+        """
+        Показывает диалог подтверждения для опасной команды.
+        Возвращает True если пользователь подтвердил выполнение.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Убираем префикс DANGER: для отображения
+        display_command = command.replace("DANGER:", "").strip()
+        
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("⚠️ Подтверждение опасной команды")
+        msg_box.setText(f"Команда может быть опасна:\n\n{display_command}\n\nВыполнить?")
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        
+        result = msg_box.exec()
+        return result == QMessageBox.Yes
 
     def _resolve_url_with_gemini(self, description):
         """
@@ -3332,6 +3593,10 @@ class VoiceAssistant:
             # Проверяем всегда, если есть текст (независимо от режима is_final_segment)
             if final_text:
                 if self._handle_website_command(final_text):
+                    return
+                
+                # Проверка команд запуска программ
+                if self._handle_launch_command(final_text):
                     return
             # -----------------------------------------------------------------------
 
