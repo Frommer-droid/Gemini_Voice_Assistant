@@ -1,0 +1,29 @@
+# Ignore everything by default
+*
+
+# Allow only these files to be tracked
+!.gitignore
+!README.md
+!RELEASE_NOTES.md
+!VERSION
+!gemini_voice_assistant.py
+!everything_search.py
+!everything_search_prompt.md
+!everything_file_filters.py
+!vless_manager.py
+!paste_text.ahk
+!paste_text.exe
+!nircmd.exe
+!xray.exe
+!logo.ico
+!Build_Tools/
+!Build_Tools/**
+!whisper_models/
+whisper_models/*
+!whisper_models/.gitkeep
+
+# Исключаем настройки и кеш компилятора
+Build_Tools/PyCompiler_settings.json
+Build_Tools/__pycache__/
+Build_Tools/__pycache__/**
+
